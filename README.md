@@ -66,18 +66,22 @@ npm run electron:build
 ### 🚨 `ENOENT: no such file or directory, open '...electron\path.txt'` (-4058 에러)
 Windows 환경에서 프로젝트를 새로 다운로드(클론)하고 `npm install`을 진행할 때, 네트워크 문제나 캐시 오류로 인해 Electron 실행에 필요한 바이너리 파일(`path.txt` 포함)이 정상적으로 받아지지 않는 고질적인 문제가 있습니다.
 
-이 에러가 발생했다면 터미널(명령 프롬프트 또는 PowerShell)에서 다음 명령어를 실행하여 꼬여있는 캐시와 모듈을 완전히 지우고 재설치해 주세요.
+**해결 방법 1: 기존 캐시 삭제 후 재설치 (기본)**
+터미널(명령 프롬프트 또는 PowerShell)에서 다음 명령어를 실행하여 꼬여있는 캐시와 모듈을 완전히 지우고 재설치해 주세요.
+- **PowerShell**: `Remove-Item -Recurse -Force node_modules\electron` 이후 `npm install`
+- **명령 프롬프트(cmd) / Git Bash**: `rmdir /s /q node_modules\electron` (cmd) 또는 `rm -rf node_modules/electron` (bash) 이후 `npm install`
 
-**PowerShell을 사용할 경우:**
-```powershell
-Remove-Item -Recurse -Force node_modules\electron
-npm install
+**해결 방법 2: 수동으로 Electron 설치 스크립트 실행 (해결 방법 1이 안 될 경우)**
+단순히 `npm install`을 다시 해도 `path.txt`가 생기지 않는다면, 백그라운드에서 다운로드가 조용히 실패하고 있을 확률이 높습니다. 이럴 때는 설치 스크립트를 직접 실행하면 에러 원인을 파악하거나 강제로 설치할 수 있습니다.
+```cmd
+node node_modules\electron\install.js
 ```
+이 명령어를 실행하면 Electron 바이너리 다운로드 진행률이 표시되며, 정상적으로 완료되면 `path.txt`가 생성됩니다.
 
-**일반 명령 프롬프트(cmd) 또는 Git Bash를 사용할 경우:**
-```bash
-rm -rf node_modules/electron
-npm install
-```
+**해결 방법 3: Electron 글로벌 캐시 삭제**
+다운로드 중 파일이 손상된 채로 PC에 영구 캐시되어 계속 설치가 실패하는 경우가 있습니다. 
+1. 파일 탐색기를 열고 주소창에 `%LOCALAPPDATA%\electron\Cache` 를 입력하여 이동합니다. (보통 `C:\Users\사용자이름\AppData\Local\electron\Cache`)
+2. 해당 폴더 안의 내용물을 **모두 삭제**합니다.
+3. 프로젝트 폴더로 돌아와 다시 `npm install`을 실행합니다.
 
-위 명령어 실행이 완료되면 다시 `npm run electron:dev`를 입력해 정상적으로 켜지는지 확인하시면 됩니다.
+위 과정을 거치면 정상적으로 `path.txt`가 생성되고 `npm run electron:dev`가 실행될 것입니다.
