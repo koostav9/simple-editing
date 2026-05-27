@@ -1,9 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, protocol, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const child_process = require('child_process');
-const { pathToFileURL } = require('url');
-
 // Register custom protocol for local media streaming
 protocol.registerSchemesAsPrivileged([
   {
