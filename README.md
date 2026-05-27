@@ -58,3 +58,26 @@ npm run electron:build
 - **프론트엔드**: React, Vite, Lucide React (아이콘 세트)
 - **앱 플랫폼**: Electron, Node.js
 - **미디어 렌더링 엔진**: FFmpeg (내장 `@ffmpeg-installer/ffmpeg`, `@ffprobe-installer/ffprobe`)
+
+---
+
+## 트러블슈팅 (문제 해결)
+
+### 🚨 `ENOENT: no such file or directory, open '...electron\path.txt'` (-4058 에러)
+Windows 환경에서 프로젝트를 새로 다운로드(클론)하고 `npm install`을 진행할 때, 네트워크 문제나 캐시 오류로 인해 Electron 실행에 필요한 바이너리 파일(`path.txt` 포함)이 정상적으로 받아지지 않는 고질적인 문제가 있습니다.
+
+이 에러가 발생했다면 터미널(명령 프롬프트 또는 PowerShell)에서 다음 명령어를 실행하여 꼬여있는 캐시와 모듈을 완전히 지우고 재설치해 주세요.
+
+**PowerShell을 사용할 경우:**
+```powershell
+Remove-Item -Recurse -Force node_modules\electron
+npm install
+```
+
+**일반 명령 프롬프트(cmd) 또는 Git Bash를 사용할 경우:**
+```bash
+rm -rf node_modules/electron
+npm install
+```
+
+위 명령어 실행이 완료되면 다시 `npm run electron:dev`를 입력해 정상적으로 켜지는지 확인하시면 됩니다.
