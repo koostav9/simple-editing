@@ -242,53 +242,79 @@ export function generateThumbnails(objectUrl, duration, count = 60) {
   });
 }
 
+// ========== FFmpeg.wasm Task Queue ==========
+
+let ffmpegTaskQueue = Promise.resolve();
+
+/**
+ * FFmpeg.wasm은 단일 인스턴스이므로 동시 실행(예: 내보내기 도중 파형 추출 등)을 막기 위해 큐를 사용합니다.
+ */
+function runFFmpegTask(taskFn) {
+  const taskPromise = ffmpegTaskQueue.then(() => taskFn());
+  ffmpegTaskQueue = taskPromise.catch(() => {}); // 체인이 끊기지 않도록 에러 삼킴
+  return taskPromise;
+}
+
 // ========== Audio Peak Generation ==========
 
 /**
- * 오디오/비디오 파일에서 파형(Waveform) 데이터를 추출합니다.
+ * 오디오/비디오 파일에서 파형(Waveform) 데이터를 FFmpeg를 이용해 추출합니다. (브라우저 메모리 한계 회피)
  * @param {string} objectUrl - 미디어 blob URL
  * @param {number} samples - 추출할 데이터 포인트 수
  * @returns {Promise<number[]>} 0~1 사이의 정규화된 파형 배열
  */
 export async function extractAudioPeaks(objectUrl, samples = 200) {
-  try {
-    // 8000Hz로 샘플 레이트를 대폭 낮춰 메모리 사용량 및 디코딩 제한(대용량 파일 컷오프) 방지
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
-    const response = await fetch(objectUrl);
-    const buffer = await response.arrayBuffer();
-    
-    // 디코딩 (대용량 비디오 파일의 경우 메모리를 많이 쓸 수 있음)
-    const audioBuffer = await audioCtx.decodeAudioData(buffer);
-    const channelData = audioBuffer.getChannelData(0); // 첫 번째 채널
-
-    const blockSize = Math.floor(channelData.length / samples);
-    const peaks = [];
-    
-    for (let i = 0; i < samples; i++) {
-      let sum = 0;
-      const start = i * blockSize;
-      // 성능을 위해 블록의 모든 값을 더하지 않고 샘플링
-      const step = Math.max(1, Math.floor(blockSize / 100)); 
-      let count = 0;
-      for (let j = 0; j < blockSize; j += step) {
-        sum += Math.abs(channelData[start + j]);
-        count++;
+  return runFFmpegTask(async () => {
+    try {
+      const ffmpeg = await getFFmpeg();
+      const inputName = 'peak_in_' + Date.now() + '.mp4';
+      const outputName = 'peak_out_' + Date.now() + '.raw';
+      
+      const fileData = await fetchFile(objectUrl);
+      await ffmpeg.writeFile(inputName, fileData);
+      
+      // FFmpeg를 사용해 오디오를 1000Hz 모노 32비트 Float RAW PCM으로 변환 (메모리 초절약)
+      await ffmpeg.exec([
+        '-i', inputName,
+        '-vn',
+        '-ac', '1',
+        '-ar', '1000', // 1초당 1000 샘플
+        '-f', 'f32le', // 32비트 float 리틀 엔디안
+        outputName
+      ]);
+      
+      const rawData = await ffmpeg.readFile(outputName);
+      // Uint8Array -> Float32Array 변환
+      const floatData = new Float32Array(rawData.buffer, rawData.byteOffset, rawData.length / 4);
+      
+      const blockSize = Math.floor(floatData.length / samples);
+      const peaks = [];
+      
+      for (let i = 0; i < samples; i++) {
+        let sum = 0;
+        const start = i * blockSize;
+        const step = Math.max(1, Math.floor(blockSize / 100)); 
+        let count = 0;
+        for (let j = 0; j < blockSize; j += step) {
+          sum += Math.abs(floatData[start + j]);
+          count++;
+        }
+        peaks.push(sum / count);
       }
-      peaks.push(sum / count);
+      
+      try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
+      try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+      
+      const max = Math.max(...peaks);
+      if (max > 0) {
+        return peaks.map(p => p / max);
+      }
+      return peaks;
+    } catch (err) {
+      console.error('FFmpeg peak extraction failed:', err);
+      return [];
     }
-    
-    audioCtx.close();
-    
-    // 정규화 (가장 큰 소리가 1이 되도록)
-    const max = Math.max(...peaks);
-    if (max > 0) {
-      return peaks.map(p => p / max);
-    }
-    return peaks;
-  } catch (err) {
-    console.error('Audio peak extraction failed:', err);
-    return [];
-  }
+  });
 }
 
 // ========== FFmpeg.wasm Singleton ==========
@@ -331,43 +357,45 @@ async function getFFmpeg() {
  * @returns {Promise<{objectUrl: string, name: string, duration: number}>}
  */
 export async function extractAudio(objectUrl, fileName) {
-  log('오디오 추출 시작...');
-  const ffmpeg = await getFFmpeg();
+  return runFFmpegTask(async () => {
+    log('오디오 추출 시작...');
+    const ffmpeg = await getFFmpeg();
 
-  const inputName = 'input_' + Date.now() + '.mp4';
-  const outputName = 'output_' + Date.now() + '.wav';
+    const inputName = 'input_' + Date.now() + '.mp4';
+    const outputName = 'output_' + Date.now() + '.wav';
 
-  const fileData = await fetchFile(objectUrl);
-  await ffmpeg.writeFile(inputName, fileData);
+    const fileData = await fetchFile(objectUrl);
+    await ffmpeg.writeFile(inputName, fileData);
 
-  await ffmpeg.exec([
-    '-i', inputName,
-    '-vn',
-    '-acodec', 'pcm_s16le',
-    '-ar', '44100',
-    '-ac', '2',
-    outputName
-  ]);
+    await ffmpeg.exec([
+      '-i', inputName,
+      '-vn',
+      '-acodec', 'pcm_s16le',
+      '-ar', '44100',
+      '-ac', '2',
+      outputName
+    ]);
 
-  const data = await ffmpeg.readFile(outputName);
-  const blob = new Blob([data.buffer], { type: 'audio/wav' });
-  const audioUrl = URL.createObjectURL(blob);
+    const data = await ffmpeg.readFile(outputName);
+    const blob = new Blob([data.buffer], { type: 'audio/wav' });
+    const audioUrl = URL.createObjectURL(blob);
 
-  // 정리
-  await ffmpeg.deleteFile(inputName);
-  await ffmpeg.deleteFile(outputName);
+    // 정리
+    await ffmpeg.deleteFile(inputName);
+    await ffmpeg.deleteFile(outputName);
 
-  // 메타데이터 가져오기
-  const metadata = await getMetadata(audioUrl);
+    // 메타데이터 가져오기
+    const metadata = await getMetadata(audioUrl);
 
-  const baseName = fileName.replace(/\.[^/.]+$/, '');
-  log('오디오 추출 완료');
+    const baseName = fileName.replace(/\.[^/.]+$/, '');
+    log('오디오 추출 완료');
 
-  return {
-    objectUrl: audioUrl,
-    name: `[추출] ${baseName}.wav`,
-    duration: metadata.duration
-  };
+    return {
+      objectUrl: audioUrl,
+      name: `[추출] ${baseName}.wav`,
+      duration: metadata.duration
+    };
+  });
 }
 
 // ========== Export Timeline (FFmpeg.wasm) ==========
@@ -377,169 +405,171 @@ export async function extractAudio(objectUrl, fileName) {
  * @param {object} params - { tracks, clips, onProgress, onStatus }
  */
 export async function exportTimeline({ tracks, clips, onProgress, onStatus }) {
-  const status = (msg) => {
-    log(msg);
-    if (onStatus) onStatus(msg);
-  };
-
-  status('FFmpeg 코어 준비 중...');
-  const ffmpeg = await getFFmpeg();
-
-  // 진행률 리스너
-  const onFFmpegProgress = ({ progress }) => {
-    if (onProgress && typeof progress === 'number') {
-      onProgress(Math.round(Math.max(0, Math.min(100, progress * 100))));
-    }
-  };
-  ffmpeg.on('progress', onFFmpegProgress);
-
-  try {
-    // 1. 고유 미디어 파일 수집 및 가상 파일시스템에 쓰기
-    const uniqueFiles = [];
-    const fileNameMap = {}; // objectUrl → virtual filename
-
-    for (const clip of clips) {
-      if (!fileNameMap[clip.objectUrl]) {
-        const ext = clip.name ? clip.name.split('.').pop() : 'mp4';
-        const virtualName = `input_${uniqueFiles.length}.${ext}`;
-        fileNameMap[clip.objectUrl] = virtualName;
-        uniqueFiles.push({ objectUrl: clip.objectUrl, virtualName });
-      }
-    }
-
-    status(`미디어 파일 준비 중... (0/${uniqueFiles.length})`);
-    for (let i = 0; i < uniqueFiles.length; i++) {
-      const { objectUrl, virtualName } = uniqueFiles[i];
-      status(`미디어 파일 읽는 중... (${i + 1}/${uniqueFiles.length})`);
-      const fileData = await fetchFile(objectUrl);
-      await ffmpeg.writeFile(virtualName, fileData);
-      log(`파일 로드 완료: ${virtualName}`);
-    }
-
-    // 2. FFmpeg filter_complex 명령어 조립
-    const getFileIndex = (objectUrl) => {
-      const virtualName = fileNameMap[objectUrl];
-      return uniqueFiles.findIndex(f => f.virtualName === virtualName);
+  return runFFmpegTask(async () => {
+    const status = (msg) => {
+      log(msg);
+      if (onStatus) onStatus(msg);
     };
 
-    let totalDuration = clips.length > 0
-      ? Math.max(...clips.map(c => c.timelineStart + (c.end - c.start)))
-      : 1;
+    status('FFmpeg 코어 준비 중...');
+    const ffmpeg = await getFFmpeg();
 
-    const inputArgs = [];
-    uniqueFiles.forEach(({ virtualName }) => {
-      inputArgs.push('-i', virtualName);
-    });
-
-    const filterComplex = [];
-
-    // --- VIDEO PIPELINE ---
-    let currentBaseLabel = '[v_base]';
-    const visibleVideoClips = [];
-
-    tracks.forEach((track) => {
-      if (track.type !== 'video' || track.visible === false) return;
-      const trackClips = clips.filter(c => c.trackId === track.id);
-      visibleVideoClips.push(...trackClips);
-    });
-
-    filterComplex.push(`color=c=black:s=1920x1080:r=30:d=${totalDuration}[v_base]`);
-
-    if (visibleVideoClips.length > 0) {
-      visibleVideoClips.forEach((clip, idx) => {
-        const inIdx = getFileIndex(clip.objectUrl);
-        const clipLabel = `[v_clip_${idx}]`;
-        const nextBaseLabel = idx === visibleVideoClips.length - 1 ? '[outv]' : `[v_layer_${idx}]`;
-
-        const scaleStr = `[${inIdx}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30`;
-        const trimStr = `trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS`;
-        filterComplex.push(`${scaleStr},${trimStr}${clipLabel}`);
-
-        const duration = clip.end - clip.start;
-        const overlayEnable = `between(t,${clip.timelineStart},${clip.timelineStart + duration})`;
-        filterComplex.push(`${currentBaseLabel}${clipLabel}overlay=shortest=0:x=0:y=0:enable='${overlayEnable}'${nextBaseLabel}`);
-
-        currentBaseLabel = `[v_layer_${idx}]`;
-      });
-    } else {
-      filterComplex.push(`color=c=black:s=1920x1080:r=30:d=${totalDuration}[outv]`);
-    }
-
-    // --- AUDIO PIPELINE ---
-    const allAudioClips = [];
-    clips.forEach(clip => {
-      const track = tracks.find(t => t.id === clip.trackId);
-      if (!track || track.muted === true) return;
-      const hasSound = clip.type === 'audio' || (clip.type === 'video' && clip.hasAudio);
-      if (hasSound && (clip.volume ?? 1) > 0) {
-        allAudioClips.push(clip);
+    // 진행률 리스너
+    const onFFmpegProgress = ({ progress }) => {
+      if (onProgress && typeof progress === 'number') {
+        onProgress(Math.round(Math.max(0, Math.min(100, progress * 100))));
       }
-    });
+    };
+    ffmpeg.on('progress', onFFmpegProgress);
 
-    const audioOutLabels = [];
+    try {
+      // 1. 고유 미디어 파일 수집 및 가상 파일시스템에 쓰기
+      const uniqueFiles = [];
+      const fileNameMap = {}; // objectUrl → virtual filename
 
-    if (allAudioClips.length > 0) {
-      allAudioClips.forEach((clip, j) => {
-        const inIdx = getFileIndex(clip.objectUrl);
-        const label = `[a_raw_${j}]`;
-        const volLabel = `[a_vol_${j}]`;
-        const delayLabel = `[a_delay_${j}]`;
+      for (const clip of clips) {
+        if (!fileNameMap[clip.objectUrl]) {
+          const ext = clip.name ? clip.name.split('.').pop() : 'mp4';
+          const virtualName = `input_${uniqueFiles.length}.${ext}`;
+          fileNameMap[clip.objectUrl] = virtualName;
+          uniqueFiles.push({ objectUrl: clip.objectUrl, virtualName });
+        }
+      }
 
-        filterComplex.push(`[${inIdx}:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS${label}`);
-        filterComplex.push(`${label}volume=${clip.volume}${volLabel}`);
+      status(`미디어 파일 준비 중... (0/${uniqueFiles.length})`);
+      for (let i = 0; i < uniqueFiles.length; i++) {
+        const { objectUrl, virtualName } = uniqueFiles[i];
+        status(`미디어 파일 읽는 중... (${i + 1}/${uniqueFiles.length})`);
+        const fileData = await fetchFile(objectUrl);
+        await ffmpeg.writeFile(virtualName, fileData);
+        log(`파일 로드 완료: ${virtualName}`);
+      }
 
-        const delayMs = Math.round(clip.timelineStart * 1000);
-        filterComplex.push(`${volLabel}adelay=delays=${delayMs}:all=1${delayLabel}`);
+      // 2. FFmpeg filter_complex 명령어 조립
+      const getFileIndex = (objectUrl) => {
+        const virtualName = fileNameMap[objectUrl];
+        return uniqueFiles.findIndex(f => f.virtualName === virtualName);
+      };
 
-        audioOutLabels.push(delayLabel);
+      let totalDuration = clips.length > 0
+        ? Math.max(...clips.map(c => c.timelineStart + (c.end - c.start)))
+        : 1;
+
+      const inputArgs = [];
+      uniqueFiles.forEach(({ virtualName }) => {
+        inputArgs.push('-i', virtualName);
       });
 
-      const mixInputs = audioOutLabels.join('');
-      filterComplex.push(`${mixInputs}amix=inputs=${allAudioClips.length}:duration=longest[outa]`);
-    } else {
-      filterComplex.push(`anullsrc=channel_layout=stereo:sample_rate=44100:d=${totalDuration}[outa]`);
+      const filterComplex = [];
+
+      // --- VIDEO PIPELINE ---
+      let currentBaseLabel = '[v_base]';
+      const visibleVideoClips = [];
+
+      tracks.forEach((track) => {
+        if (track.type !== 'video' || track.visible === false) return;
+        const trackClips = clips.filter(c => c.trackId === track.id);
+        visibleVideoClips.push(...trackClips);
+      });
+
+      filterComplex.push(`color=c=black:s=1920x1080:r=30:d=${totalDuration}[v_base]`);
+
+      if (visibleVideoClips.length > 0) {
+        visibleVideoClips.forEach((clip, idx) => {
+          const inIdx = getFileIndex(clip.objectUrl);
+          const clipLabel = `[v_clip_${idx}]`;
+          const nextBaseLabel = idx === visibleVideoClips.length - 1 ? '[outv]' : `[v_layer_${idx}]`;
+
+          const scaleStr = `[${inIdx}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,fps=30`;
+          const trimStr = `trim=start=${clip.start}:end=${clip.end},setpts=PTS-STARTPTS`;
+          filterComplex.push(`${scaleStr},${trimStr}${clipLabel}`);
+
+          const duration = clip.end - clip.start;
+          const overlayEnable = `between(t,${clip.timelineStart},${clip.timelineStart + duration})`;
+          filterComplex.push(`${currentBaseLabel}${clipLabel}overlay=shortest=0:x=0:y=0:enable='${overlayEnable}'${nextBaseLabel}`);
+
+          currentBaseLabel = `[v_layer_${idx}]`;
+        });
+      } else {
+        filterComplex.push(`color=c=black:s=1920x1080:r=30:d=${totalDuration}[outv]`);
+      }
+
+      // --- AUDIO PIPELINE ---
+      const allAudioClips = [];
+      clips.forEach(clip => {
+        const track = tracks.find(t => t.id === clip.trackId);
+        if (!track || track.muted === true) return;
+        const hasSound = clip.type === 'audio' || (clip.type === 'video' && clip.hasAudio);
+        if (hasSound && (clip.volume ?? 1) > 0) {
+          allAudioClips.push(clip);
+        }
+      });
+
+      const audioOutLabels = [];
+
+      if (allAudioClips.length > 0) {
+        allAudioClips.forEach((clip, j) => {
+          const inIdx = getFileIndex(clip.objectUrl);
+          const label = `[a_raw_${j}]`;
+          const volLabel = `[a_vol_${j}]`;
+          const delayLabel = `[a_delay_${j}]`;
+
+          filterComplex.push(`[${inIdx}:a]atrim=start=${clip.start}:end=${clip.end},asetpts=PTS-STARTPTS${label}`);
+          filterComplex.push(`${label}volume=${clip.volume}${volLabel}`);
+
+          const delayMs = Math.round(clip.timelineStart * 1000);
+          filterComplex.push(`${volLabel}adelay=delays=${delayMs}:all=1${delayLabel}`);
+
+          audioOutLabels.push(delayLabel);
+        });
+
+        const mixInputs = audioOutLabels.join('');
+        filterComplex.push(`${mixInputs}amix=inputs=${allAudioClips.length}:duration=longest[outa]`);
+      } else {
+        filterComplex.push(`anullsrc=channel_layout=stereo:sample_rate=44100:d=${totalDuration}[outa]`);
+      }
+
+      const filterComplexStr = filterComplex.join(';');
+      const outputName = 'output.mp4';
+
+      const args = [
+        '-y',
+        ...inputArgs,
+        '-filter_complex', filterComplexStr,
+        '-map', '[outv]',
+        '-map', '[outa]',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast', // 렌더링 속도 최우선 (WASM 환경 필수)
+        '-crf', '28', // 속도 및 용량 최적화 (기본값 23보다 약간 더 빠른 렌더링)
+        '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        outputName
+      ];
+
+      status('FFmpeg 비디오 렌더링 시작...');
+      log(`명령어: ${args.join(' ')}`);
+
+      await ffmpeg.exec(args);
+
+      // 3. 출력 파일 읽기 → 다운로드
+      status('최종 파일 생성 중...');
+      const data = await ffmpeg.readFile(outputName);
+      const blob = new Blob([data.buffer], { type: 'video/mp4' });
+      downloadBlob(blob, 'exported_video.mp4');
+
+      // 정리
+      for (const { virtualName } of uniqueFiles) {
+        try { await ffmpeg.deleteFile(virtualName); } catch { /* ignore */ }
+      }
+      try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+
+      status('내보내기 완료!');
+      return true;
+    } finally {
+      ffmpeg.off('progress', onFFmpegProgress);
     }
-
-    const filterComplexStr = filterComplex.join(';');
-    const outputName = 'output.mp4';
-
-    const args = [
-      '-y',
-      ...inputArgs,
-      '-filter_complex', filterComplexStr,
-      '-map', '[outv]',
-      '-map', '[outa]',
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast', // 렌더링 속도 최우선 (WASM 환경 필수)
-      '-crf', '28', // 속도 및 용량 최적화 (기본값 23보다 약간 더 빠른 렌더링)
-      '-pix_fmt', 'yuv420p',
-      '-c:a', 'aac',
-      '-b:a', '192k',
-      outputName
-    ];
-
-    status('FFmpeg 비디오 렌더링 시작...');
-    log(`명령어: ${args.join(' ')}`);
-
-    await ffmpeg.exec(args);
-
-    // 3. 출력 파일 읽기 → 다운로드
-    status('최종 파일 생성 중...');
-    const data = await ffmpeg.readFile(outputName);
-    const blob = new Blob([data.buffer], { type: 'video/mp4' });
-    downloadBlob(blob, 'exported_video.mp4');
-
-    // 정리
-    for (const { virtualName } of uniqueFiles) {
-      try { await ffmpeg.deleteFile(virtualName); } catch { /* ignore */ }
-    }
-    try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
-
-    status('내보내기 완료!');
-    return true;
-  } finally {
-    ffmpeg.off('progress', onFFmpegProgress);
-  }
+  });
 }
 
 // ========== Download Helper ==========
