@@ -78,8 +78,7 @@ export default function Timeline({
   const handleSeek = (clientX) => {
     if (!rulerRef.current) return;
     const rect = rulerRef.current.getBoundingClientRect();
-    const scrollLeft = containerRef.current ? containerRef.current.scrollLeft : 0;
-    const relativeX = clientX - rect.left + scrollLeft;
+    const relativeX = clientX - rect.left;
     let newTime = relativeX / scale;
     if (newTime < 0) newTime = 0;
     if (newTime > totalRulerSeconds) newTime = totalRulerSeconds;
@@ -116,8 +115,7 @@ export default function Timeline({
       const mediaItem = JSON.parse(dataStr);
       
       const rect = e.currentTarget.getBoundingClientRect();
-      const scrollLeft = containerRef.current ? containerRef.current.scrollLeft : 0;
-      const x = e.clientX - rect.left + scrollLeft;
+      const x = e.clientX - rect.left;
       const dropTime = x / scale;
 
       onAddMediaToTimeline(mediaItem, trackType, dropTime);
