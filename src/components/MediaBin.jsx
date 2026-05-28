@@ -1,9 +1,11 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Video, Music, Plus, Scissors, Loader } from 'lucide-react';
+import * as api from '../utils/browserApi';
 
-export default function MediaBin({ mediaList, onAddMedia, onTimelineAdd }) {
+export default function MediaBin({ mediaList, onAddMedia, onUpdateMedia, onTimelineAdd }) {
   const [isImporting, setIsImporting] = useState(false);
   const [extractingIds, setExtractingIds] = useState({});
+  const fileInputRef = useRef(null);
 
   const formatDuration = (sec) => {
     const mins = Math.floor(sec / 60);
@@ -11,37 +13,49 @@ export default function MediaBin({ mediaList, onAddMedia, onTimelineAdd }) {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleImport = async (type) => {
+  const handleImport = async () => {
     try {
       setIsImporting(true);
-      const filePath = await window.api.selectFile(type);
-      if (!filePath) return;
+      const result = await api.selectFile('all');
+      if (!result) return;
+
+      const { file, objectUrl, name } = result;
 
       // Avoid duplicates
-      if (mediaList.some(m => m.filePath === filePath)) {
+      if (mediaList.some(m => m.name === name && m.file?.size === file.size)) {
         alert('이미 추가된 파일입니다.');
+        URL.revokeObjectURL(objectUrl);
         return;
       }
 
-      const metadata = await window.api.getMetadata(filePath);
-      
+      const metadata = await api.getMetadata(objectUrl);
+
       let thumbnails = [];
       if (metadata.hasVideo) {
-        thumbnails = await window.api.generateThumbnails({ filePath, duration: metadata.duration });
+        thumbnails = await api.generateThumbnails(objectUrl, metadata.duration);
       }
 
       const newMedia = {
         id: 'media_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-        name: filePath.split(/[\\/]/).pop(),
-        filePath,
+        name,
+        file,
+        objectUrl,
         type: metadata.hasVideo ? 'video' : 'audio',
         duration: metadata.duration,
         width: metadata.width,
         height: metadata.height,
         fps: metadata.fps,
         hasAudio: metadata.hasAudio,
-        thumbnails
+        thumbnails,
+        audioPeaks: [] // 처음에 빈 배열, 비동기로 업데이트
       };
+
+      if (metadata.hasAudio) {
+        // 백그라운드에서 오디오 파형 추출 (1000개 샘플)
+        api.extractAudioPeaks(objectUrl, 1000).then(peaks => {
+          onUpdateMedia(newMedia.id, { audioPeaks: peaks }, objectUrl);
+        }).catch(err => console.error(err));
+      }
 
       onAddMedia(newMedia);
     } catch (err) {
@@ -60,17 +74,21 @@ export default function MediaBin({ mediaList, onAddMedia, onTimelineAdd }) {
 
     try {
       setExtractingIds(prev => ({ ...prev, [mediaItem.id]: true }));
-      const audioPath = await window.api.extractAudio(mediaItem.filePath);
-      
-      const audioMetadata = await window.api.getMetadata(audioPath);
+      const result = await api.extractAudio(mediaItem.objectUrl, mediaItem.name);
+
       const newAudioMedia = {
         id: 'media_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-        name: '[추출된 음향] ' + mediaItem.name.replace(/\.[^/.]+$/, "") + '.wav',
-        filePath: audioPath,
+        name: result.name,
+        objectUrl: result.objectUrl,
         type: 'audio',
-        duration: audioMetadata.duration,
-        hasAudio: true
+        duration: result.duration,
+        hasAudio: true,
+        audioPeaks: []
       };
+
+      api.extractAudioPeaks(result.objectUrl, 1000).then(peaks => {
+        onUpdateMedia(newAudioMedia.id, { audioPeaks: peaks }, result.objectUrl);
+      });
 
       onAddMedia(newAudioMedia);
       alert('오디오 분리가 완료되었습니다!');
@@ -83,7 +101,10 @@ export default function MediaBin({ mediaList, onAddMedia, onTimelineAdd }) {
   };
 
   const handleDragStart = (e, mediaItem) => {
-    e.dataTransfer.setData('application/json', JSON.stringify(mediaItem));
+    e.dataTransfer.setData('application/json', JSON.stringify({
+      ...mediaItem,
+      file: undefined // File 객체는 직렬화 불가
+    }));
     e.dataTransfer.effectAllowed = 'copy';
   };
 
@@ -94,13 +115,21 @@ export default function MediaBin({ mediaList, onAddMedia, onTimelineAdd }) {
       </div>
       
       <div className="media-container">
-        <div className="dropzone" onClick={() => handleImport('all')}>
+        <div className="dropzone" onClick={handleImport}>
           <Plus size={24} />
           <div>클릭하여 미디어 파일 추가</div>
           <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
             MP4, MKV, MOV, MP3, WAV 등 지원
           </span>
         </div>
+
+        {/* Hidden file input for drag-drop fallback */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="video/*,audio/*"
+          style={{ display: 'none' }}
+        />
 
         {isImporting && (
           <div style={{ textAlign: 'center', padding: '8px', color: 'var(--accent)' }}>

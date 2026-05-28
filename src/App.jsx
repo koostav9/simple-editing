@@ -4,6 +4,7 @@ import Player from './components/Player';
 import PropertiesPanel from './components/PropertiesPanel';
 import Timeline from './components/Timeline';
 import { Film, Download } from 'lucide-react';
+import * as api from './utils/browserApi';
 
 export default function App() {
   // Global Application State
@@ -12,18 +13,18 @@ export default function App() {
   const [clips, setClips] = useState([]);
   
   const [playhead, setPlayhead] = useState(0);
-  const [zoom, setZoom] = useState(40); // default: 40px per second
+  const [zoom, setZoom] = useState(40);
   const [isPlaying, setIsPlaying] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState(null);
 
   // Export State
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  const [exportStatus, setExportStatus] = useState('');
 
-  // Handle hotkeys (Space for play/pause, Delete to remove selected clip, Arrow keys to navigate)
+  // Handle hotkeys
   useEffect(() => {
     const handleKeyDown = (e) => {
-      // Avoid hotkeys when editing inputs or interacting with buttons/selects to prevent double triggers
       if (['INPUT', 'TEXTAREA', 'BUTTON', 'SELECT'].includes(e.target.tagName)) return;
 
       if (e.code === 'Space') {
@@ -50,7 +51,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedClipId, clips]);
 
-  // Helper to locate a clip and calculate layout positions
   function findClip(id) {
     const clip = clips.find(c => c.id === id);
     if (!clip) return null;
@@ -61,7 +61,14 @@ export default function App() {
     setMediaList(prev => [...prev, newMedia]);
   };
 
-  // Add media item to timeline (creates new track and clip)
+  const handleUpdateMedia = (id, updates, objectUrl) => {
+    setMediaList(prev => prev.map(m => m.id === id ? { ...m, ...updates } : m));
+    if (objectUrl) {
+      setClips(prev => prev.map(c => c.objectUrl === objectUrl ? { ...c, ...updates } : c));
+    }
+  };
+
+  // Add media item to timeline
   function handleTimelineAdd(mediaItem, _trackType = null, dropTime = null) {
     void _trackType;
     const trackId = 'track_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -70,7 +77,7 @@ export default function App() {
     const newTrack = {
       id: trackId,
       name: mediaItem.name,
-      type: mediaItem.type, // 'video' or 'audio'
+      type: mediaItem.type,
       visible: true,
       muted: false
     };
@@ -79,7 +86,7 @@ export default function App() {
       id: clipId,
       trackId: trackId,
       name: mediaItem.name,
-      filePath: mediaItem.filePath,
+      objectUrl: mediaItem.objectUrl,
       type: mediaItem.type,
       start: 0,
       end: mediaItem.duration,
@@ -87,14 +94,15 @@ export default function App() {
       timelineStart: dropTime !== null ? dropTime : playhead,
       volume: 1,
       thumbnails: mediaItem.thumbnails || [],
+      audioPeaks: mediaItem.audioPeaks || [],
       hasAudio: mediaItem.hasAudio || mediaItem.type === 'audio'
     };
 
     setTracks(prev => [...prev, newTrack]);
     setClips(prev => [...prev, newClip]);
-  };
+  }
 
-  // Update clip bounds (Trimming/Moving)
+  // Update clip bounds
   function handleUpdateClipTimes(id, _trackType, start, end, timelineStart) {
     void _trackType;
     setClips(prev => prev.map(c => {
@@ -103,13 +111,13 @@ export default function App() {
       }
       return c;
     }));
-  };
+  }
 
   // Update clip volume
   function handleUpdateVolume(id, _trackType, volume) {
     void _trackType;
     setClips(prev => prev.map(c => c.id === id ? { ...c, volume } : c));
-  };
+  }
 
   // Split clip at current playhead
   function handleSplitClip(id, _trackType) {
@@ -143,14 +151,13 @@ export default function App() {
       return updated;
     });
     setSelectedClipId(clip2.id);
-  };
+  }
 
   // Delete clip from track
   function handleDeleteClip(id, _trackType) {
     void _trackType;
     setClips(prev => {
       const remainingClips = prev.filter(c => c.id !== id);
-      // Clean up empty tracks
       const activeTrackIds = new Set(remainingClips.map(c => c.trackId));
       setTracks(tPrev => tPrev.filter(t => activeTrackIds.has(t.id)));
       return remainingClips;
@@ -158,24 +165,23 @@ export default function App() {
     if (selectedClipId === id) {
       setSelectedClipId(null);
     }
-  };
+  }
 
-  // Extract audio from a timeline video clip (Capcut style)
+  // Extract audio from a timeline video clip
   const handleExtractClipAudio = async (clipId) => {
     const clip = clips.find(c => c.id === clipId);
     if (!clip || clip.type !== 'video' || !clip.hasAudio) return;
 
     try {
       setIsPlaying(false);
-      const audioPath = await window.api.extractAudio(clip.filePath);
-      const audioMetadata = await window.api.getMetadata(audioPath);
+      const result = await api.extractAudio(clip.objectUrl, clip.name);
       
       const newTrackId = 'track_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
       const newClipId = 'clip_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
 
       const newTrack = {
         id: newTrackId,
-        name: '[추출] ' + clip.name.replace(/\.[^/.]+$/, "") + '.wav',
+        name: result.name,
         type: 'audio',
         visible: true,
         muted: false
@@ -184,18 +190,19 @@ export default function App() {
       const newClip = {
         id: newClipId,
         trackId: newTrackId,
-        name: '[추출] ' + clip.name.replace(/\.[^/.]+$/, "") + '.wav',
-        filePath: audioPath,
+        name: result.name,
+        objectUrl: result.objectUrl,
         type: 'audio',
         start: clip.start,
         end: clip.end,
-        sourceDuration: audioMetadata.duration,
+        sourceDuration: result.duration,
         timelineStart: clip.timelineStart,
         volume: 1,
-        hasAudio: true
+        hasAudio: true,
+        audioPeaks: clip.audioPeaks || [] // Use original clip's audio peaks for now (since it's the same audio)
       };
 
-      // Mute the original video clip (Capcut style: volume = 0)
+      // Mute the original video clip
       setClips(prev => prev.map(c => {
         if (c.id === clip.id) {
           return { ...c, volume: 0 };
@@ -204,14 +211,14 @@ export default function App() {
       }).concat(newClip));
 
       setTracks(prev => [...prev, newTrack]);
-      setSelectedClipId(newClipId); // select the newly created audio clip
+      setSelectedClipId(newClipId);
     } catch (err) {
       console.error(err);
       alert('오디오 분리에 실패했습니다:\n' + err.message);
     }
   };
 
-  // Export Compilation Flow
+  // Export
   const handleExport = async () => {
     if (clips.length === 0) {
       alert('내보낼 클립이 타임라인에 없습니다.');
@@ -219,29 +226,23 @@ export default function App() {
     }
 
     try {
-      const outputPath = await window.api.selectSavePath();
-      if (!outputPath) return;
-
       setIsPlaying(false);
       setExporting(true);
       setExportProgress(0);
+      setExportStatus('준비 중...');
 
-      // Listen to progress IPC channel
-      const removeListener = window.api.onExportProgress((percent) => {
-        setExportProgress(percent);
-      });
-
-      await window.api.exportTimeline({
+      await api.exportTimeline({
         tracks,
         clips,
-        outputPath
+        onStatus: (status) => setExportStatus(status),
+        onProgress: (percent) => setExportProgress(percent)
       });
 
-      removeListener();
+      setExportStatus('완료!');
       setExportProgress(100);
       setTimeout(() => {
         setExporting(false);
-        alert('동영상 저장이 완료되었습니다!\n경로: ' + outputPath);
+        alert('동영상 내보내기가 완료되었습니다!\nMP4 파일이 자동으로 다운로드됩니다.');
       }, 500);
 
     } catch (err) {
@@ -269,14 +270,13 @@ export default function App() {
       {/* Main Grid View */}
       <div className="main-workspace">
         <div className="upper-pane">
-          {/* Media list library */}
           <MediaBin 
             mediaList={mediaList} 
             onAddMedia={handleAddMedia}
+            onUpdateMedia={handleUpdateMedia}
             onTimelineAdd={handleTimelineAdd}
           />
           
-          {/* Canvas player */}
           <Player 
             tracks={tracks}
             clips={clips}
@@ -287,7 +287,6 @@ export default function App() {
             zoom={zoom}
           />
 
-          {/* Properties mixer */}
           <PropertiesPanel 
             selectedClip={selectedClip}
             onUpdateVolume={handleUpdateVolume}
@@ -298,7 +297,6 @@ export default function App() {
           />
         </div>
 
-        {/* Editing Timeline */}
         <Timeline 
           tracks={tracks}
           clips={clips}
@@ -317,15 +315,19 @@ export default function App() {
         />
       </div>
 
-      {/* Export progress modal overlay */}
+      {/* Export progress modal */}
       {exporting && (
         <div className="modal-overlay">
           <div className="modal-content">
-            <div className="modal-title">동영상 렌더링 중...</div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+            <div className="modal-title">동영상 내보내기</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '13px', marginBottom: '15px' }}>
               타임라인을 1080p 고화질 MP4 파일로 내보내고 있습니다. 잠시만 기다려주세요.
             </div>
             
+            <div style={{ fontWeight: 'bold', marginBottom: '8px', color: 'var(--accent)', fontSize: '14px' }}>
+              {exportStatus}
+            </div>
+
             <div className="progress-container">
               <div 
                 className="progress-bar" 

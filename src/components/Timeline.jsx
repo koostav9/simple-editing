@@ -1,4 +1,4 @@
-import { useRef, useEffect } from 'react';
+import { useRef } from 'react';
 import { Scissors, Trash2, ZoomIn, ZoomOut, Video, Music, Eye, EyeOff, Volume2, VolumeX } from 'lucide-react';
 
 export default function Timeline({
@@ -19,24 +19,6 @@ export default function Timeline({
 }) {
   const rulerRef = useRef(null);
   const containerRef = useRef(null);
-  const videoTrackRef = useRef(null);
-  const audioTrackRef = useRef(null);
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      if (videoTrackRef.current && audioTrackRef.current) {
-        const vRect = videoTrackRef.current.getBoundingClientRect();
-        const aRect = audioTrackRef.current.getBoundingClientRect();
-        if (window.api && window.api.log) {
-          window.api.log(
-            `VideoTrack: top=${vRect.top.toFixed(1)}, height=${vRect.height.toFixed(1)} | ` +
-            `AudioTrack: top=${aRect.top.toFixed(1)}, height=${aRect.height.toFixed(1)}`
-          );
-        }
-      }
-    }, 1500);
-    return () => clearInterval(timer);
-  }, []);
 
   // Constants
   const minZoom = 2; // 2px per second (1200px screens fit 10 minutes)
@@ -221,12 +203,12 @@ export default function Timeline({
       // Map fractionOfSource (0.0 to 1.0) to index of the extracted thumbnails array
       const thumbIdx = Math.min(clip.thumbnails.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.thumbnails.length)));
       
-      const thumbPath = clip.thumbnails[thumbIdx];
-      if (thumbPath) {
+      const thumbSrc = clip.thumbnails[thumbIdx];
+      if (thumbSrc) {
         thumbs.push(
           <img
             key={i}
-            src={`media://${thumbPath}`}
+            src={thumbSrc}
             alt="thumb"
             className="timeline-clip-thumb-img"
             style={{ width: `${100 / numThumbs}%`, height: '100%', objectFit: 'cover', opacity: 0.85, borderRight: '1px solid rgba(0,0,0,0.2)' }}
@@ -248,23 +230,24 @@ export default function Timeline({
     const numBars = Math.min(1200, Math.max(8, Math.floor(clip.width / step)));
     const bars = [];
     
-    let seed = 0;
-    const name = clip.name || '';
-    for (let i = 0; i < name.length; i++) {
-      seed += name.charCodeAt(i);
-    }
-    
     for (let i = 0; i < numBars; i++) {
       const timeFraction = i / numBars;
       const sourceTime = clip.start + timeFraction * (clip.end - clip.start);
       
-      const f1 = Math.sin(sourceTime * 2.3 + seed * 0.05);
-      const f2 = Math.cos(sourceTime * 0.85 - seed * 0.12);
-      const f3 = Math.sin(sourceTime * 4.8 + seed * 0.22);
-      const combined = Math.abs(f1 * 0.45 + f2 * 0.32 + f3 * 0.18);
+      let combined = 0.05; // 파형 로딩 중에는 약간의 기본 선명도만 유지
+      if (clip.audioPeaks && clip.audioPeaks.length > 0) {
+        const fractionOfSource = sourceTime / clip.sourceDuration;
+        const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
+        
+        // 인간의 청각은 로그 스케일이므로, 시각적으로 더 잘 보이도록 제곱근 처리를 하고 볼륨을 증폭합니다.
+        const rawPeak = clip.audioPeaks[peakIdx] || 0;
+        combined = Math.pow(rawPeak, 0.5) * 1.5;
+      }
       
       const volumeScale = clip.volume ?? 1;
-      const heightPercent = Math.max(15, Math.min(95, (15 + combined * 80) * volumeScale));
+      // 소리가 작은 부분은 높이가 0에 가깝도록 (2%) 수정
+      // peak 값이 작을 때도 2%는 유지하도록 함
+      const heightPercent = Math.max(2, Math.min(95, (combined * 100) * volumeScale));
       
       bars.push(
         <div
@@ -338,10 +321,7 @@ export default function Timeline({
         </div>
       </div>
 
-      {/* Temporary Debug Overlay */}
-      <div style={{ position: 'fixed', top: '50px', right: '10px', backgroundColor: 'rgba(0,0,0,0.85)', color: '#00f0ff', padding: '10px', borderRadius: '6px', zIndex: 99999, fontSize: '11px', fontFamily: 'monospace', border: '1px solid #00f0ff', pointerEvents: 'none' }}>
-        <div>Tracks Count: {tracks.length} | Clips Count: {clips.length}</div>
-      </div>
+
 
       {/* Main Track Layout Grid */}
       <div className="timeline-workspace" ref={containerRef} style={{ flex: 1, overflowX: 'auto', overflowY: 'hidden', position: 'relative' }}>
@@ -375,8 +355,9 @@ export default function Timeline({
             {tracks.map(track => {
               const trackClips = clipsWithLayout.filter(c => c.trackId === track.id);
               const isVideo = track.type === 'video';
-              const height = isVideo ? '88px' : '64px';
-              const clipHeight = isVideo ? '80px' : '56px';
+              // 비디오와 오디오 트랙 모두 동일하게 높여서 오디오 파형이 잘 보이도록 함
+              const height = isVideo ? '88px' : '88px';
+              const clipHeight = isVideo ? '80px' : '80px';
 
               return (
                 <div 

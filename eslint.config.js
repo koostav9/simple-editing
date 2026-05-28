@@ -19,12 +19,11 @@ export default defineConfig([
     },
   },
   {
-    files: ['main.js', 'preload.js', 'eslint.config.js', 'vite.config.js'],
+    files: ['eslint.config.js', 'vite.config.js'],
     extends: [js.configs.recommended],
     languageOptions: {
       globals: {
         ...globals.node,
-        ...globals.browser,
       },
     },
   },
