@@ -252,7 +252,8 @@ export function generateThumbnails(objectUrl, duration, count = 60) {
  */
 export async function extractAudioPeaks(objectUrl, samples = 200) {
   try {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // 8000Hz로 샘플 레이트를 대폭 낮춰 메모리 사용량 및 디코딩 제한(대용량 파일 컷오프) 방지
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
     const response = await fetch(objectUrl);
     const buffer = await response.arrayBuffer();
     

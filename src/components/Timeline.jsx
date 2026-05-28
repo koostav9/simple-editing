@@ -238,7 +238,9 @@ export default function Timeline({
         const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
         
         // 인간의 청각은 로그 스케일이므로, 시각적으로 더 잘 보이도록 제곱근 처리를 하고 볼륨을 증폭합니다.
-        const rawPeak = clip.audioPeaks[peakIdx] || 0;
+        let rawPeak = clip.audioPeaks[peakIdx] || 0;
+        // 노이즈 플로어 제거: 백그라운드 노이즈(약 2% 이하)는 완전히 0으로 처리하여 깔끔하게 표시
+        if (rawPeak < 0.02) rawPeak = 0;
         combined = Math.pow(rawPeak, 0.5) * 1.5;
       }
       
