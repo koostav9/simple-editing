@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useEffect, useCallback } from 'react';
 import { Scissors, Trash2, ZoomIn, ZoomOut, Video, Music, Eye, EyeOff, Volume2, VolumeX } from 'lucide-react';
 
 export default function Timeline({
@@ -218,55 +218,65 @@ export default function Timeline({
     return <div className="timeline-clip-thumbs" style={{ position: 'absolute', top: '20px', left: 0, right: 0, height: '38px', display: 'flex', overflow: 'hidden', pointerEvents: 'none' }}>{thumbs}</div>;
   };
 
-  // 2. Render Audio Waveform Bars
-  const renderAudioWaveform = (clip, isEmbeddedInVideo = false) => {
-    // 성능을 위해 최대 1200개 바로 제한하되, flex:1로 전체 너비를 균등 분할
-    const numBars = Math.min(1200, Math.max(8, Math.floor(clip.width / 3)));
-    const bars = [];
+  // 2. Render Audio Waveform (Canvas 기반 — 바 수 무제한, 성능 걱정 없음)
+  const WaveformCanvas = useCallback(({ clip, isEmbeddedInVideo }) => {
+    const canvasRef = useRef(null);
     
-    for (let i = 0; i < numBars; i++) {
-      const timeFraction = i / numBars;
-      const sourceTime = clip.start + timeFraction * (clip.end - clip.start);
+    useEffect(() => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
       
-      let combined = 0.05; // 파형 로딩 중에는 약간의 기본 선명도만 유지
-      if (clip.audioPeaks && clip.audioPeaks.length > 0) {
-        const fractionOfSource = sourceTime / clip.sourceDuration;
-        const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
-        
-        // 인간의 청각은 로그 스케일이므로, 시각적으로 더 잘 보이도록 제곱근 처리를 하고 볼륨을 증폭합니다.
-        let rawPeak = clip.audioPeaks[peakIdx] || 0;
-        // 노이즈 플로어 제거: 백그라운드 노이즈(약 2% 이하)는 완전히 0으로 처리하여 깔끔하게 표시
-        if (rawPeak < 0.02) rawPeak = 0;
-        combined = Math.pow(rawPeak, 0.5) * 1.5;
-      }
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
       
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, h);
+      
+      const isMuted = clip.volume === 0;
+      const color = isMuted ? '#4b5563' : (isEmbeddedInVideo ? '#00f0ff' : '#00e5ff');
+      const alpha = isMuted ? 0.35 : 0.85;
+      ctx.fillStyle = color;
+      ctx.globalAlpha = alpha;
+      
+      // 1px 당 1개 바 — 픽셀 수만큼 그리므로 항상 최대 밀도
+      const numBars = Math.max(1, Math.floor(w));
+      const barW = w / numBars;
       const volumeScale = clip.volume ?? 1;
-      const heightPercent = Math.max(2, Math.min(95, (combined * 100) * volumeScale));
       
-      bars.push(
-        <div
-          key={i}
-          className="timeline-waveform-bar"
-          style={{ 
-            height: `${heightPercent}%`,
-            flex: 1,
-            minWidth: 0,
-            backgroundColor: isEmbeddedInVideo 
-              ? (clip.volume === 0 ? '#4b5563' : '#00f0ff') 
-              : '#00e5ff',
-            opacity: clip.volume === 0 ? 0.35 : 0.85,
-            borderRadius: '1px 1px 0 0',
-            transition: 'height 0.15s ease'
-          }}
-        />
-      );
-    }
+      for (let i = 0; i < numBars; i++) {
+        const timeFraction = i / numBars;
+        const sourceTime = clip.start + timeFraction * (clip.end - clip.start);
+        
+        let combined = 0.03;
+        if (clip.audioPeaks && clip.audioPeaks.length > 0) {
+          const fractionOfSource = sourceTime / clip.sourceDuration;
+          const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
+          let rawPeak = clip.audioPeaks[peakIdx] || 0;
+          if (rawPeak < 0.02) rawPeak = 0;
+          combined = Math.pow(rawPeak, 0.5) * 1.5;
+        }
+        
+        const heightFraction = Math.max(0.02, Math.min(0.95, combined * volumeScale));
+        const barH = heightFraction * h;
+        ctx.fillRect(i * barW, h - barH, Math.max(barW - 0.5, 0.5), barH);
+      }
+    }, [clip.start, clip.end, clip.sourceDuration, clip.audioPeaks, clip.volume, isEmbeddedInVideo]);
     
-    const containerStyle = isEmbeddedInVideo
-      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' }
-      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' };
-
-    return <div className="timeline-clip-waveform" style={containerStyle}>{bars}</div>;
+    const style = isEmbeddedInVideo
+      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, pointerEvents: 'none', zIndex: 0 }
+      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', pointerEvents: 'none', zIndex: 0 };
+    
+    return <canvas ref={canvasRef} style={{ ...style, width: '100%', height: style.height || undefined }} />;
+  }, []);
+  
+  const renderAudioWaveform = (clip, isEmbeddedInVideo = false) => {
+    return <WaveformCanvas clip={clip} isEmbeddedInVideo={isEmbeddedInVideo} />;
   };
 
   return (
