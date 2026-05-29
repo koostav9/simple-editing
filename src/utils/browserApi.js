@@ -273,37 +273,44 @@ export async function extractAudioPeaks(objectUrl, samples = 200) {
       const fileData = await fetchFile(objectUrl);
       await ffmpeg.writeFile(inputName, fileData);
       
-      // FFmpeg를 사용해 오디오를 1000Hz 모노 32비트 Float RAW PCM으로 변환 (메모리 초절약)
+      // FFmpeg로 오디오를 100Hz 모노 32비트 Float RAW PCM으로 변환
+      // 100Hz = 1초당 100샘플만 생성하여 WASM 메모리 사용을 최소화 (28분 = ~672KB)
       await ffmpeg.exec([
         '-i', inputName,
         '-vn',
         '-ac', '1',
-        '-ar', '1000', // 1초당 1000 샘플
-        '-f', 'f32le', // 32비트 float 리틀 엔디안
+        '-ar', '100',
+        '-f', 'f32le',
         outputName
       ]);
       
-      const rawData = await ffmpeg.readFile(outputName);
-      // Uint8Array -> Float32Array 변환
-      const floatData = new Float32Array(rawData.buffer, rawData.byteOffset, rawData.length / 4);
+      // 입력 파일을 먼저 삭제하여 WASM 메모리 확보 (대용량 영상 파일 해제)
+      try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
       
-      const blockSize = Math.floor(floatData.length / samples);
+      const rawData = await ffmpeg.readFile(outputName);
+      try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+      
+      // Uint8Array -> Float32Array 변환
+      const floatData = new Float32Array(rawData.buffer, rawData.byteOffset, Math.floor(rawData.length / 4));
+      
+      if (floatData.length === 0) return [];
+      
+      // 실제 디코딩된 데이터 길이에 기반하여 샘플 수 결정 (데이터가 적으면 샘플 수 줄임)
+      const actualSamples = Math.min(samples, floatData.length);
+      const blockSize = Math.max(1, Math.floor(floatData.length / actualSamples));
       const peaks = [];
       
-      for (let i = 0; i < samples; i++) {
-        let sum = 0;
+      for (let i = 0; i < actualSamples; i++) {
+        let maxVal = 0;
         const start = i * blockSize;
-        const step = Math.max(1, Math.floor(blockSize / 100)); 
-        let count = 0;
-        for (let j = 0; j < blockSize; j += step) {
-          sum += Math.abs(floatData[start + j]);
-          count++;
+        const end = Math.min(start + blockSize, floatData.length);
+        // 블록 내 최대 절대값(peak)을 사용 — 평균보다 파형 시각화에 더 정확
+        for (let j = start; j < end; j++) {
+          const abs = Math.abs(floatData[j]);
+          if (abs > maxVal) maxVal = abs;
         }
-        peaks.push(sum / count);
+        peaks.push(maxVal);
       }
-      
-      try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
-      try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
       
       const max = Math.max(...peaks);
       if (max > 0) {
