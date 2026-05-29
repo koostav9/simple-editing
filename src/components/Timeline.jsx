@@ -220,12 +220,8 @@ export default function Timeline({
 
   // 2. Render Audio Waveform Bars
   const renderAudioWaveform = (clip, isEmbeddedInVideo = false) => {
-    const barWidth = 2;
-    const gap = 3;
-    const step = barWidth + gap; // 5px
-    
-    // Set a high cap (1200) to keep rendering performance optimal while maintaining dense details
-    const numBars = Math.min(1200, Math.max(8, Math.floor(clip.width / step)));
+    // 성능을 위해 최대 1200개 바로 제한하되, flex:1로 전체 너비를 균등 분할
+    const numBars = Math.min(1200, Math.max(8, Math.floor(clip.width / 3)));
     const bars = [];
     
     for (let i = 0; i < numBars; i++) {
@@ -245,8 +241,6 @@ export default function Timeline({
       }
       
       const volumeScale = clip.volume ?? 1;
-      // 소리가 작은 부분은 높이가 0에 가깝도록 (2%) 수정
-      // peak 값이 작을 때도 2%는 유지하도록 함
       const heightPercent = Math.max(2, Math.min(95, (combined * 100) * volumeScale));
       
       bars.push(
@@ -255,7 +249,8 @@ export default function Timeline({
           className="timeline-waveform-bar"
           style={{ 
             height: `${heightPercent}%`,
-            width: `${barWidth}px`,
+            flex: 1,
+            minWidth: 0,
             backgroundColor: isEmbeddedInVideo 
               ? (clip.volume === 0 ? '#4b5563' : '#00f0ff') 
               : '#00e5ff',
@@ -268,8 +263,8 @@ export default function Timeline({
     }
     
     const containerStyle = isEmbeddedInVideo
-      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-start', gap: `${gap}px`, padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' }
-      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-start', gap: `${gap}px`, padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' };
+      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' }
+      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' };
 
     return <div className="timeline-clip-waveform" style={containerStyle}>{bars}</div>;
   };
