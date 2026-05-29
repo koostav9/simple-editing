@@ -52,7 +52,7 @@ export default function MediaBin({ mediaList, onAddMedia, onUpdateMedia, onTimel
 
       if (metadata.hasAudio) {
         // 백그라운드에서 오디오 파형 추출 (1000개 샘플)
-        api.extractAudioPeaks(objectUrl, 1000).then(peaks => {
+        api.extractAudioPeaks(objectUrl, 1000, metadata.duration).then(peaks => {
           onUpdateMedia(newMedia.id, { audioPeaks: peaks }, objectUrl);
         }).catch(err => console.error(err));
       }
@@ -86,7 +86,7 @@ export default function MediaBin({ mediaList, onAddMedia, onUpdateMedia, onTimel
         audioPeaks: []
       };
 
-      api.extractAudioPeaks(result.objectUrl, 1000).then(peaks => {
+      api.extractAudioPeaks(result.objectUrl, 1000, result.duration).then(peaks => {
         onUpdateMedia(newAudioMedia.id, { audioPeaks: peaks }, result.objectUrl);
       });
 

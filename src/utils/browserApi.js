@@ -258,67 +258,111 @@ function runFFmpegTask(taskFn) {
 // ========== Audio Peak Generation ==========
 
 /**
- * 오디오/비디오 파일에서 파형(Waveform) 데이터를 FFmpeg를 이용해 추출합니다. (브라우저 메모리 한계 회피)
+ * 오디오/비디오 파일에서 파형(Waveform) 데이터를 추출합니다.
+ * 
+ * 2단계 접근:
+ * 1) FFmpeg로 원본에서 경량 WAV(8kHz 모노 16bit)를 추출 → 대용량 원본 즉시 삭제
+ * 2) Web Audio API로 경량 WAV를 디코딩 → PCM 데이터에서 피크 계산
+ * 
+ * 이렇게 하면 FFmpeg의 극저 샘플레이트 리샘플링 버그를 회피하면서도
+ * Web Audio API에 전달하는 데이터가 충분히 작아 메모리 한계에 걸리지 않습니다.
+ * (28분 오디오 → WAV ~27MB → 디코딩 후 ~54MB, 전혀 무리 없음)
+ * 
  * @param {string} objectUrl - 미디어 blob URL
  * @param {number} samples - 추출할 데이터 포인트 수
+ * @param {number} duration - 원본 미디어의 총 길이(초). 전달하면 피크 시간 정렬이 정확해짐
  * @returns {Promise<number[]>} 0~1 사이의 정규화된 파형 배열
  */
-export async function extractAudioPeaks(objectUrl, samples = 200) {
+export async function extractAudioPeaks(objectUrl, samples = 200, duration = 0) {
   return runFFmpegTask(async () => {
     try {
       const ffmpeg = await getFFmpeg();
-      const inputName = 'peak_in_' + Date.now() + '.mp4';
-      const outputName = 'peak_out_' + Date.now() + '.raw';
+      const ts = Date.now();
+      const inputName = `peak_in_${ts}.mp4`;
+      const wavName = `peak_wav_${ts}.wav`;
       
+      // ── Step 1: FFmpeg로 경량 WAV 추출 ──
       const fileData = await fetchFile(objectUrl);
       await ffmpeg.writeFile(inputName, fileData);
       
-      // FFmpeg로 오디오를 100Hz 모노 32비트 Float RAW PCM으로 변환
-      // 100Hz = 1초당 100샘플만 생성하여 WASM 메모리 사용을 최소화 (28분 = ~672KB)
+      // 8kHz 모노 16-bit WAV로 변환 (28분 → ~27MB, 안정적인 표준 샘플레이트)
       await ffmpeg.exec([
         '-i', inputName,
         '-vn',
         '-ac', '1',
-        '-ar', '100',
-        '-f', 'f32le',
-        outputName
+        '-ar', '8000',
+        '-c:a', 'pcm_s16le',
+        wavName
       ]);
       
-      // 입력 파일을 먼저 삭제하여 WASM 메모리 확보 (대용량 영상 파일 해제)
+      // 대용량 원본 즉시 삭제하여 WASM 메모리 확보
       try { await ffmpeg.deleteFile(inputName); } catch { /* ignore */ }
       
-      const rawData = await ffmpeg.readFile(outputName);
-      try { await ffmpeg.deleteFile(outputName); } catch { /* ignore */ }
+      // WAV 데이터 읽기 후 가상 파일시스템에서 삭제
+      const wavData = await ffmpeg.readFile(wavName);
+      try { await ffmpeg.deleteFile(wavName); } catch { /* ignore */ }
       
-      // Uint8Array -> Float32Array 변환
-      const floatData = new Float32Array(rawData.buffer, rawData.byteOffset, Math.floor(rawData.length / 4));
+      log(`[AudioPeaks] WAV 추출 완료: ${(wavData.length / 1024 / 1024).toFixed(1)}MB`);
       
-      if (floatData.length === 0) return [];
+      if (wavData.length < 100) {
+        console.warn('[AudioPeaks] WAV 데이터가 너무 작습니다');
+        return [];
+      }
       
-      // 실제 디코딩된 데이터 길이에 기반하여 샘플 수 결정 (데이터가 적으면 샘플 수 줄임)
-      const actualSamples = Math.min(samples, floatData.length);
-      const blockSize = Math.max(1, Math.floor(floatData.length / actualSamples));
+      // ── Step 2: Web Audio API로 디코딩 ──
+      // 복사하여 정렬된 ArrayBuffer 생성 (WASM 메모리와 분리)
+      const wavBuffer = new ArrayBuffer(wavData.length);
+      new Uint8Array(wavBuffer).set(wavData);
+      
+      const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 8000 });
+      let audioBuffer;
+      try {
+        audioBuffer = await audioCtx.decodeAudioData(wavBuffer);
+      } finally {
+        audioCtx.close();
+      }
+      
+      const channelData = audioBuffer.getChannelData(0);
+      const decodedDuration = audioBuffer.duration;
+      log(`[AudioPeaks] 디코딩 완료: ${channelData.length} 샘플 (${decodedDuration.toFixed(1)}s)`);
+      
+      if (channelData.length === 0) return [];
+      
+      // ── Step 3: 피크 계산 ──
+      // duration이 주어지면 그 값을 기준으로, 아니면 디코딩된 길이를 기준으로 피크 매핑
+      const refDuration = duration > 0 ? duration : decodedDuration;
+      const totalSamplesExpected = Math.round(refDuration * audioBuffer.sampleRate);
+      
+      const actualSamples = Math.min(samples, channelData.length);
+      const blockSize = Math.max(1, Math.floor(totalSamplesExpected / actualSamples));
       const peaks = [];
       
       for (let i = 0; i < actualSamples; i++) {
         let maxVal = 0;
         const start = i * blockSize;
-        const end = Math.min(start + blockSize, floatData.length);
-        // 블록 내 최대 절대값(peak)을 사용 — 평균보다 파형 시각화에 더 정확
+        const end = Math.min(start + blockSize, channelData.length);
+        
+        if (start >= channelData.length) {
+          // 데이터 범위를 초과하면 0 (무음)
+          peaks.push(0);
+          continue;
+        }
+        
         for (let j = start; j < end; j++) {
-          const abs = Math.abs(floatData[j]);
+          const abs = Math.abs(channelData[j]);
           if (abs > maxVal) maxVal = abs;
         }
         peaks.push(maxVal);
       }
       
+      // 정규화
       const max = Math.max(...peaks);
       if (max > 0) {
         return peaks.map(p => p / max);
       }
       return peaks;
     } catch (err) {
-      console.error('FFmpeg peak extraction failed:', err);
+      console.error('Audio peak extraction failed:', err);
       return [];
     }
   });
