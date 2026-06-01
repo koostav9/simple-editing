@@ -221,7 +221,6 @@ export default function Timeline({
   // 2. Render Audio Waveform Bars
   const renderAudioWaveform = (clip, isEmbeddedInVideo = false) => {
     // 성능을 위해 최대 10000개 바로 제한하되, flex:1로 전체 너비를 균등 분할
-    // (주의: 너무 많은 DOM 요소는 렌더링 성능 저하를 유발할 수 있습니다)
     const numBars = Math.min(10000, Math.max(8, Math.floor(clip.width / 1)));
     const bars = [];
     
@@ -229,20 +228,39 @@ export default function Timeline({
       const timeFraction = i / numBars;
       const sourceTime = clip.start + timeFraction * (clip.end - clip.start);
       
-      let combined = 0.05; // 파형 로딩 중에는 약간의 기본 선명도만 유지
+      let combined = 0; // 기본값 0 (무음)
+      let rawPeakNormalized = 0; // 색상 결정용 원본 피크 (0~1)
+      
       if (clip.audioPeaks && clip.audioPeaks.length > 0) {
         const fractionOfSource = sourceTime / clip.sourceDuration;
         const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
         
-        // 인간의 청각은 로그 스케일이므로, 시각적으로 더 잘 보이도록 제곱근 처리를 하고 볼륨을 증폭합니다.
         let rawPeak = clip.audioPeaks[peakIdx] || 0;
-        // 노이즈 플로어 제거: 백그라운드 노이즈(약 2% 이하)는 완전히 0으로 처리하여 깔끔하게 표시
-        if (rawPeak < 0.02) rawPeak = 0;
-        combined = Math.pow(rawPeak, 0.5) * 1.5;
+        // 노이즈 플로어 제거: 백그라운드 노이즈(약 3% 이하)는 완전히 0으로 처리
+        if (rawPeak < 0.03) rawPeak = 0;
+        rawPeakNormalized = rawPeak;
+        // 약한 로그 스케일 (0.75승) — 증폭 없이 실제 볼륨에 가깝게 매핑
+        // 0.1→18%, 0.3→40%, 0.5→59%, 0.7→76%, 1.0→100%
+        combined = Math.pow(rawPeak, 0.75);
       }
       
       const volumeScale = clip.volume ?? 1;
-      const heightPercent = Math.max(2, Math.min(95, (combined * 100) * volumeScale));
+      // 무음일 때는 높이 0으로 명확하게 표시
+      const heightPercent = Math.min(100, (combined * 100) * volumeScale);
+      
+      // 색상 결정: 진폭에 따라 시안 → 노랑 → 빨강 그라데이션
+      let barColor;
+      if (clip.volume === 0) {
+        barColor = '#4b5563'; // 음소거 시 회색
+      } else if (rawPeakNormalized >= 0.85) {
+        barColor = '#ff3b30'; // 🔴 매우 큰 소리 (박수, 충격음) → 빨강
+      } else if (rawPeakNormalized >= 0.65) {
+        barColor = '#ff9500'; // 🟠 큰 소리 → 주황
+      } else if (rawPeakNormalized >= 0.45) {
+        barColor = '#ffcc00'; // 🟡 중간~큰 소리 → 노랑
+      } else {
+        barColor = isEmbeddedInVideo ? '#00f0ff' : '#00e5ff'; // 🔵 보통~작은 소리 → 시안
+      }
       
       bars.push(
         <div
@@ -252,12 +270,9 @@ export default function Timeline({
             height: `${heightPercent}%`,
             flex: 1,
             minWidth: 0,
-            backgroundColor: isEmbeddedInVideo 
-              ? (clip.volume === 0 ? '#4b5563' : '#00f0ff') 
-              : '#00e5ff',
-            opacity: clip.volume === 0 ? 0.35 : 0.85,
-            borderRadius: '1px 1px 0 0',
-            transition: 'height 0.15s ease'
+            backgroundColor: barColor,
+            opacity: clip.volume === 0 ? 0.35 : 0.9,
+            borderRadius: '1px 1px 0 0'
           }}
         />
       );
@@ -351,9 +366,9 @@ export default function Timeline({
             {tracks.map(track => {
               const trackClips = clipsWithLayout.filter(c => c.trackId === track.id);
               const isVideo = track.type === 'video';
-              // 비디오와 오디오 트랙 모두 동일하게 높여서 오디오 파형이 잘 보이도록 함
-              const height = isVideo ? '88px' : '88px';
-              const clipHeight = isVideo ? '80px' : '80px';
+              // 오디오 트랙은 사운드바 대비를 확실히 보기 위해 2배 높이로 설정
+              const height = isVideo ? '88px' : '160px';
+              const clipHeight = isVideo ? '80px' : '150px';
 
               return (
                 <div 
