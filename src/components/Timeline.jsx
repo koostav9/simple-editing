@@ -218,60 +218,64 @@ export default function Timeline({
     return <div className="timeline-clip-thumbs" style={{ position: 'absolute', top: '20px', left: 0, right: 0, height: '38px', display: 'flex', overflow: 'hidden', pointerEvents: 'none' }}>{thumbs}</div>;
   };
 
-  // 2. Render Audio Waveform Bars
+  // 2. Render Audio Waveform (DOM 기반, absolute 위치 — CapCut 스타일)
   const renderAudioWaveform = (clip, isEmbeddedInVideo = false) => {
-    // 성능을 위해 최대 10000개 바로 제한하되, flex:1로 전체 너비를 균등 분할
-    const numBars = Math.min(10000, Math.max(8, Math.floor(clip.width / 1)));
+    const barWidth = 2;   // 2px 너비
+    const gap = 1;         // 1px 간격
+    const step = barWidth + gap;
+    const numBars = Math.max(4, Math.floor(clip.width / step));
     const bars = [];
+    
+    const volumeScale = clip.volume ?? 1;
+    const isMuted = clip.volume === 0;
     
     for (let i = 0; i < numBars; i++) {
       const timeFraction = i / numBars;
       const sourceTime = clip.start + timeFraction * (clip.end - clip.start);
       
-      let combined = 0; // 기본값 0 (무음)
-      let rawPeakNormalized = 0; // 색상 결정용 원본 피크 (0~1)
+      let rawPeak = 0;
       
       if (clip.audioPeaks && clip.audioPeaks.length > 0) {
         const fractionOfSource = sourceTime / clip.sourceDuration;
-        const peakIdx = Math.min(clip.audioPeaks.length - 1, Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length)));
-        
-        let rawPeak = clip.audioPeaks[peakIdx] || 0;
-        // 노이즈 플로어 제거: 백그라운드 노이즈(약 3% 이하)는 완전히 0으로 처리
+        const peakIdx = Math.min(
+          clip.audioPeaks.length - 1, 
+          Math.max(0, Math.floor(fractionOfSource * clip.audioPeaks.length))
+        );
+        rawPeak = clip.audioPeaks[peakIdx] || 0;
         if (rawPeak < 0.03) rawPeak = 0;
-        rawPeakNormalized = rawPeak;
-        // 약한 로그 스케일 (0.75승) — 증폭 없이 실제 볼륨에 가깝게 매핑
-        // 0.1→18%, 0.3→40%, 0.5→59%, 0.7→76%, 1.0→100%
-        combined = Math.pow(rawPeak, 0.75);
       }
       
-      const volumeScale = clip.volume ?? 1;
-      // 무음일 때는 높이 0으로 명확하게 표시
-      const heightPercent = Math.min(100, (combined * 100) * volumeScale);
+      // 높이 계산: 0.75승 스케일
+      const combined = Math.pow(rawPeak, 0.75);
+      const heightPercent = Math.min(100, combined * 100 * volumeScale);
       
-      // 색상 결정: 진폭에 따라 시안 → 노랑 → 빨강 그라데이션
-      let barColor;
-      if (clip.volume === 0) {
-        barColor = '#4b5563'; // 음소거 시 회색
-      } else if (rawPeakNormalized >= 0.85) {
-        barColor = '#ff3b30'; // 🔴 매우 큰 소리 (박수, 충격음) → 빨강
-      } else if (rawPeakNormalized >= 0.65) {
-        barColor = '#ff9500'; // 🟠 큰 소리 → 주황
-      } else if (rawPeakNormalized >= 0.45) {
-        barColor = '#ffcc00'; // 🟡 중간~큰 소리 → 노랑
+      if (heightPercent < 0.5) continue; // 무음 스킵
+      
+      // 색상 결정
+      let color;
+      if (isMuted) {
+        color = '#4b5563';
+      } else if (rawPeak >= 0.85) {
+        color = '#ff3b30';
+      } else if (rawPeak >= 0.65) {
+        color = '#ff9500';
+      } else if (rawPeak >= 0.45) {
+        color = '#ffcc00';
       } else {
-        barColor = isEmbeddedInVideo ? '#00f0ff' : '#00e5ff'; // 🔵 보통~작은 소리 → 시안
+        color = isEmbeddedInVideo ? '#00f0ff' : '#00e5ff';
       }
       
       bars.push(
         <div
           key={i}
-          className="timeline-waveform-bar"
           style={{ 
+            position: 'absolute',
+            bottom: 0,
+            left: `${i * step}px`,
+            width: `${barWidth}px`,
             height: `${heightPercent}%`,
-            flex: 1,
-            minWidth: 0,
-            backgroundColor: barColor,
-            opacity: clip.volume === 0 ? 0.35 : 0.9,
+            backgroundColor: color,
+            opacity: isMuted ? 0.35 : 0.9,
             borderRadius: '1px 1px 0 0'
           }}
         />
@@ -279,14 +283,26 @@ export default function Timeline({
     }
     
     const containerStyle = isEmbeddedInVideo
-      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' }
-      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', display: 'flex', alignItems: 'flex-end', gap: '1px', padding: '0 4px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' };
+      ? { position: 'absolute', height: '20px', bottom: '2px', left: 0, right: 0, pointerEvents: 'none', zIndex: 0, overflow: 'hidden' }
+      : { position: 'absolute', top: '18px', left: 0, right: 0, bottom: '2px', pointerEvents: 'none', zIndex: 0, overflow: 'hidden' };
 
     return <div className="timeline-clip-waveform" style={containerStyle}>{bars}</div>;
   };
 
+  // 키보드 좌/우 화살표로 플레이헤드 0.01초씩 이동
+  const handleKeyDown = (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      // 0.01초 단위로 정밀하게 이동
+      const tickStep = 0.01;
+      const delta = e.key === 'ArrowRight' ? tickStep : -tickStep;
+      // 부동소수점 오차(예: 4.94499999999) 방지를 위해 소수점 3자리까지 반올림
+      setPlayhead(prev => Math.max(0, Math.round((prev + delta) * 1000) / 1000));
+    }
+  };
+
   return (
-    <div className="lower-pane">
+    <div className="lower-pane" tabIndex={0} onKeyDown={handleKeyDown} style={{ outline: 'none' }}>
       {/* Timeline Toolbar */}
       <div className="timeline-toolbar">
         <div className="toolbar-group">
