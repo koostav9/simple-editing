@@ -102,12 +102,14 @@ export default function App() {
     setClips(prev => [...prev, newClip]);
   }
 
-  // Update clip bounds
-  function handleUpdateClipTimes(id, _trackType, start, end, timelineStart) {
+  // Update clip bounds (+ optional track change)
+  function handleUpdateClipTimes(id, _trackType, start, end, timelineStart, newTrackId) {
     void _trackType;
     setClips(prev => prev.map(c => {
       if (c.id === id) {
-        return { ...c, start, end, timelineStart };
+        const updated = { ...c, start, end, timelineStart };
+        if (newTrackId) updated.trackId = newTrackId;
+        return updated;
       }
       return c;
     }));

@@ -134,17 +134,45 @@ export default function Timeline({
     const initialEnd = clip.end;
     const initialTimelineStart = clip.timelineStart;
 
+    // 스냅 타겟 수집 (타 클립 엣지, 플레이헤드, 0초)
+    const trackClips = clips.filter(c => c.trackId === clip.trackId && c.id !== clip.id);
+    const snapEdges = [0, playhead];
+    trackClips.forEach(c => {
+      snapEdges.push(c.timelineStart);
+      snapEdges.push(c.timelineStart + (c.end - c.start));
+    });
+
     const handleMouseMove = (moveEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const deltaSec = deltaX / scale;
+      const snapThresholdSec = 15 / scale; // 15px 반경 스냅
 
       if (edge === 'right') {
-        const newEnd = Math.max(initialStart + 0.1, initialEnd + deltaSec);
+        let newEnd = Math.max(initialStart + 0.1, initialEnd + deltaSec);
+        let currentTimelineEnd = initialTimelineStart + (newEnd - initialStart);
+        
+        // 우측 엣지 스냅
+        for (const snapEdge of snapEdges) {
+          if (Math.abs(currentTimelineEnd - snapEdge) < snapThresholdSec) {
+            currentTimelineEnd = snapEdge;
+            newEnd = initialStart + (currentTimelineEnd - initialTimelineStart);
+            break;
+          }
+        }
         onUpdateClipTimes(clip.id, clip.type, initialStart, newEnd, clip.timelineStart);
       } else if (edge === 'left') {
-        const newStart = Math.min(initialEnd - 0.1, Math.max(0, initialStart + deltaSec));
+        let newStart = Math.min(initialEnd - 0.1, Math.max(0, initialStart + deltaSec));
         const actualShift = newStart - initialStart;
-        const newTimelineStart = Math.max(0, initialTimelineStart + actualShift);
+        let newTimelineStart = Math.max(0, initialTimelineStart + actualShift);
+        
+        // 좌측 엣지 스냅
+        for (const snapEdge of snapEdges) {
+          if (Math.abs(newTimelineStart - snapEdge) < snapThresholdSec) {
+            newTimelineStart = snapEdge;
+            newStart = initialStart + (newTimelineStart - initialTimelineStart);
+            break;
+          }
+        }
           
         onUpdateClipTimes(clip.id, clip.type, newStart, initialEnd, newTimelineStart);
       }
@@ -159,23 +187,167 @@ export default function Timeline({
     window.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Drag to Move Clip horizontally
+  // Drag to Move Clip — 겹침 방지 + 트랙 간 이동 지원
   const handleClipMoveStart = (e, clip) => {
     e.stopPropagation();
     e.preventDefault();
 
     const startX = e.clientX;
+    const startY = e.clientY;
     const initialTimelineStart = clip.timelineStart;
+    const clipDuration = clip.end - clip.start;
+    const clipType = tracks.find(t => t.id === clip.trackId)?.type || clip.type;
+    let currentTrackId = clip.trackId;
+    
+    // 드래그 시작 시 클립에 시각적 피드백
+    const clipEl = e.currentTarget;
+    clipEl.style.opacity = '0.7';
+    clipEl.style.zIndex = '100';
 
     const handleMouseMove = (moveEvent) => {
       const deltaX = moveEvent.clientX - startX;
       const deltaSec = deltaX / scale;
-      const newTimelineStart = Math.max(0, initialTimelineStart + deltaSec);
+      let newTimelineStart = Math.max(0, initialTimelineStart + deltaSec);
       
-      onUpdateClipTimes(clip.id, clip.type, clip.start, clip.end, newTimelineStart);
+      // --- 1. 수직 이동: 마우스가 어떤 트랙 위에 있는지 감지 ---
+      const trackElements = containerRef.current?.querySelectorAll('[data-track-id]');
+      let targetTrackId = currentTrackId;
+      let belowAllTracks = true;
+      
+      if (trackElements) {
+        for (const trackEl of trackElements) {
+          const rect = trackEl.getBoundingClientRect();
+          if (moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom) {
+            const tId = trackEl.getAttribute('data-track-id');
+            const tType = trackEl.getAttribute('data-track-type');
+            // 같은 타입의 트랙으로만 이동 가능
+            if (tType === clipType) {
+              targetTrackId = tId;
+            }
+            belowAllTracks = false;
+            break;
+          }
+          if (moveEvent.clientY < rect.top) {
+            belowAllTracks = false;
+          }
+        }
+      }
+      
+      // 모든 트랙 아래로 드래그한 경우: 새 트랙 생성
+      if (belowAllTracks && moveEvent.clientY > startY + 50) {
+        const existingSameTypeTracks = tracks.filter(t => t.type === clipType);
+        const lastSameTypeTrack = existingSameTypeTracks[existingSameTypeTracks.length - 1];
+        // 마지막 같은 타입 트랙에 클립이 없으면 그곳을 사용, 아니면 새 트랙 생성
+        const lastTrackClips = clips.filter(c => c.trackId === lastSameTypeTrack?.id && c.id !== clip.id);
+        if (lastSameTypeTrack && lastTrackClips.length === 0) {
+          targetTrackId = lastSameTypeTrack.id;
+        } else {
+          // 새 트랙을 생성
+          const newTrackId = 'track_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+          const newTrack = {
+            id: newTrackId,
+            name: clipType === 'video' ? 'Video' : 'Audio',
+            type: clipType,
+            visible: true,
+            muted: false
+          };
+          setTracks(prev => [...prev, newTrack]);
+          targetTrackId = newTrackId;
+        }
+      }
+      
+      currentTrackId = targetTrackId;
+      
+      // --- 2. 스냅 (타겟 트랙의 클립들 기준) ---
+      const targetTrackClips = clips.filter(c => c.trackId === targetTrackId && c.id !== clip.id);
+      const snapEdges = [0, playhead];
+      targetTrackClips.forEach(c => {
+        snapEdges.push(c.timelineStart);
+        snapEdges.push(c.timelineStart + (c.end - c.start));
+      });
+      
+      const snapThresholdSec = 15 / scale;
+      let snapped = false;
+      
+      for (const snapEdge of snapEdges) {
+        if (Math.abs(newTimelineStart - snapEdge) < snapThresholdSec) {
+          newTimelineStart = snapEdge;
+          snapped = true;
+          break;
+        }
+      }
+      
+      if (!snapped) {
+        const newTimelineEnd = newTimelineStart + clipDuration;
+        for (const snapEdge of snapEdges) {
+          if (Math.abs(newTimelineEnd - snapEdge) < snapThresholdSec) {
+            newTimelineStart = snapEdge - clipDuration;
+            break;
+          }
+        }
+      }
+      
+      // --- 3. 겹침 방지: 같은 트랙의 다른 클립과 겹치면 밀어내기 ---
+      const newEnd = newTimelineStart + clipDuration;
+      let hasOverlap = false;
+      
+      for (const other of targetTrackClips) {
+        const otherStart = other.timelineStart;
+        const otherEnd = other.timelineStart + (other.end - other.start);
+        
+        // 겹침 감지
+        if (newTimelineStart < otherEnd && newEnd > otherStart) {
+          hasOverlap = true;
+          // 어느 쪽이 더 가까운지 판단하여 해당 방향으로 밀어냄
+          const pushLeft = otherStart - clipDuration; // 다른 클립 왼쪽에 붙이기
+          const pushRight = otherEnd; // 다른 클립 오른쪽에 붙이기
+          
+          const distLeft = Math.abs(newTimelineStart - pushLeft);
+          const distRight = Math.abs(newTimelineStart - pushRight);
+          
+          if (pushLeft >= 0 && distLeft <= distRight) {
+            // 왼쪽에 붙이기 전에 왼쪽에 또 겹치는 클립이 없는지 확인
+            const leftOk = !targetTrackClips.some(c2 => {
+              if (c2.id === other.id) return false;
+              const c2End = c2.timelineStart + (c2.end - c2.start);
+              return pushLeft < c2End && (pushLeft + clipDuration) > c2.timelineStart;
+            });
+            if (leftOk) {
+              newTimelineStart = pushLeft;
+            } else {
+              newTimelineStart = pushRight;
+            }
+          } else {
+            // 오른쪽에 붙이기 전에 오른쪽에 또 겹치는 클립이 없는지 확인
+            const rightOk = !targetTrackClips.some(c2 => {
+              if (c2.id === other.id) return false;
+              const c2End = c2.timelineStart + (c2.end - c2.start);
+              return pushRight < c2End && (pushRight + clipDuration) > c2.timelineStart;
+            });
+            if (rightOk) {
+              newTimelineStart = pushRight;
+            } else {
+              newTimelineStart = Math.max(0, pushLeft);
+            }
+          }
+          break;
+        }
+      }
+      
+      newTimelineStart = Math.max(0, newTimelineStart);
+      onUpdateClipTimes(clip.id, clip.type, clip.start, clip.end, newTimelineStart, targetTrackId);
     };
 
     const handleMouseUp = () => {
+      clipEl.style.opacity = '';
+      clipEl.style.zIndex = '';
+      
+      // 빈 트랙 정리: 클립이 하나도 없는 트랙은 자동 삭제
+      setTracks(prev => {
+        const usedTrackIds = new Set(clips.map(c => c.id === clip.id ? currentTrackId : c.trackId));
+        return prev.filter(t => usedTrackIds.has(t.id));
+      });
+      
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
@@ -389,6 +561,8 @@ export default function Timeline({
               return (
                 <div 
                   key={track.id} 
+                  data-track-id={track.id}
+                  data-track-type={track.type}
                   style={{ display: 'flex', height: height, borderBottom: '1px solid var(--border-color)', position: 'relative' }}
                 >
                   {/* Left Track label block / tile (sticky) */}
